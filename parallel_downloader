@@ -1,0 +1,148 @@
+#!/usr/bin/python
+
+import urllib2
+import thread
+import thread
+import time
+import os
+
+fileindex_lck = thread.allocate_lock()
+openurl_lck = thread.allocate_lock()
+fileindex = 0
+
+maxThreadCount = 8
+if len(os.sys.argv) > 2:
+    maxThreadCount = int(os.sys.argv[2])
+if maxThreadCount == 0:
+    maxThreadCount = 8
+
+threadCount = 0
+
+srcFile = ""
+if len(os.sys.argv) > 1:
+    srcFile = os.sys.argv[1]
+
+if not srcFile:
+    print "Usage: %s <url> [threadcount] [target filename]" % (os.sys.argv[0])
+    os.sys.exit(0)
+
+dstFile = None
+if len(os.sys.argv) > 3:
+    dstFile = open(os.sys.argv[3], "w")
+
+if not dstFile:
+    dstFile = open(os.path.basename(srcFile), "w")
+
+progressed = 0
+totalSize = 0
+rangeList = []
+itemSize = 0
+
+def openurl(url, offset, size):
+    rc = None
+    req = None
+
+    if offset == 0 and size == 0:
+	req = urllib2.Request(url)
+    else:
+	hdr = {'Range':'bytes=%d-%d' % (offset, offset + size)}
+	req = urllib2.Request(url, headers=hdr)
+    rc = urllib2.urlopen(req)
+
+    return rc
+
+def downloadThread(ix):
+    global fileindex
+    global fileindex_lck
+    global openurl_lck
+    global threadCount
+    global rangeList
+
+    global progressed
+
+    while 1:
+	openurl_lck.acquire()
+
+	if fileindex >= len(rangeList):
+	    openurl_lck.release()
+	    break
+
+	itemRange = rangeList[fileindex]
+	fileindex += 1
+
+	sepFile = openurl(srcFile, itemRange[0], itemRange[1])
+	openurl_lck.release()
+
+	cpos = itemRange[0]
+
+	while 1:
+	    buf = sepFile.read(4096)
+
+	    if not buf:
+		break
+
+	    if cpos >= itemRange[1]:
+		break
+
+	    fileindex_lck.acquire()
+	    dstFile.seek(cpos)
+	    if cpos + len(buf) > itemRange[1] + 1:
+		buf = buf[:itemRange[1] + 1 - cpos + len(buf)]
+	    dstFile.write(buf)
+	    progressed += len(buf)
+	    cpos += len(buf)
+	    fileindex_lck.release()
+
+	sepFile.close()
+
+    fileindex_lck.acquire()
+    threadCount -= 1
+    fileindex_lck.release()
+
+AcceptRange = True
+
+totalFile = openurl(srcFile, 0, 0)
+
+if totalFile.headers['accept-ranges'] != 'bytes':
+    print "Accept ranges failed:%s, Threading is not able" % totalFile.headers['accept-ranges']
+    AcceptRange = False
+    maxThreadCount = 1
+
+totalSize = int(totalFile.headers['Content-Length'])
+itemSize = int((totalSize / maxThreadCount + 1023) / 1024) * 1024
+
+print "Total size: %d (Bytes)" % totalSize
+
+totalFile.close()
+
+cpos = 0
+while 1:
+    if cpos + itemSize > totalSize:
+	rangeList.append((cpos, totalSize - 1))
+	break
+
+    rangeList.append((cpos, cpos + itemSize - 1))
+    cpos += itemSize
+
+sepFile = None
+
+threadCount = maxThreadCount
+
+for i in range(maxThreadCount):
+    thread.start_new_thread(downloadThread, (i, ))
+
+while 1:
+    fileindex_lck.acquire()
+    if threadCount == 0:
+	fileindex_lck.release()
+	break
+    fileindex_lck.release()
+    lastsize = progressed
+    time.sleep(1)
+    speed = progressed - lastsize
+    print "%d B/s progressed: %d%%" % (speed, (progressed * 100 / totalSize))
+
+
+dstFile.close()
+
+print "Done"
